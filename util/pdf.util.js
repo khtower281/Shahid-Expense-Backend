@@ -1,6 +1,5 @@
 const PDFDocument = require('pdfkit');
 
-/* Brand palette */
 const COLORS = {
   primary: '#1E3A8A',
   accent: '#2563EB',
@@ -15,9 +14,6 @@ const COLORS = {
 
 const PAGE_MARGIN = 40;
 
-/* ------------------------------------------------------------------ */
-/*                              UTILITIES                             */
-/* ------------------------------------------------------------------ */
 const formatDate = (d) => {
   const date = new Date(d);
   const day = String(date.getDate()).padStart(2, '0');
@@ -31,15 +27,9 @@ const formatMoney = (n) =>
     maximumFractionDigits: 2
   });
 
-const truncate = (str, max) => {
-  const s = String(str || '');
-  if (s.length <= max) return s;
-  return s.slice(0, Math.max(0, max - 1)).trimEnd() + '…';
-};
-
 /**
  * Shrink font size to fit a string in a given width.
- * Returns the font size (never larger than maxSize, never below minSize).
+ * Never returns a size bigger than maxSize, never smaller than minSize.
  */
 const fitFontSize = (doc, text, maxWidth, maxSize, minSize = 6, font = 'Helvetica') => {
   let size = maxSize;
@@ -51,9 +41,13 @@ const fitFontSize = (doc, text, maxWidth, maxSize, minSize = 6, font = 'Helvetic
   return size;
 };
 
-/* ------------------------------------------------------------------ */
-/*                          MAIN BUILDER                              */
-/* ------------------------------------------------------------------ */
+const paymentLabel = (t) => {
+  if (t.paymentMethod === 'Check') {
+    return t.checkNumber ? `Cheque #${t.checkNumber}` : 'Cheque';
+  }
+  return t.paymentMethod || '';
+};
+
 const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => {
   const doc = new PDFDocument({ size: 'A4', margin: PAGE_MARGIN, bufferPages: true });
 
@@ -63,44 +57,30 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
 
   doc.pipe(res);
 
-  /* ------------------------------------------------------------------ */
-  /*                              HEADER                                */
-  /* ------------------------------------------------------------------ */
+  /* Header */
   const headerH = 96;
   doc.rect(0, 0, doc.page.width, headerH).fill(COLORS.primary);
 
-  doc
-    .fillColor(COLORS.white)
-    .fontSize(22)
-    .font('Helvetica-Bold')
-    .text('Shahid Expense', PAGE_MARGIN, 26);
+  doc.fillColor(COLORS.white).fontSize(22).font('Helvetica-Bold')
+     .text('Shahid Expense', PAGE_MARGIN, 26);
 
-  doc
-    .fontSize(10)
-    .font('Helvetica')
-    .fillColor('#BFDBFE')
-    .text('Transaction Report', PAGE_MARGIN, 56);
+  doc.fontSize(10).font('Helvetica').fillColor('#BFDBFE')
+     .text('Transaction Report', PAGE_MARGIN, 56);
 
   const rightColX = doc.page.width - PAGE_MARGIN;
-  doc
-    .fontSize(9)
-    .fillColor(COLORS.white)
-    .text(`Generated: ${new Date().toLocaleString()}`, PAGE_MARGIN, 30, {
-      width: rightColX - PAGE_MARGIN,
-      align: 'right'
-    });
+  doc.fontSize(9).fillColor(COLORS.white)
+     .text(`Generated: ${new Date().toLocaleString()}`, PAGE_MARGIN, 30, {
+       width: rightColX - PAGE_MARGIN,
+       align: 'right'
+     });
 
-  doc
-    .fontSize(9)
-    .fillColor('#BFDBFE')
-    .text(`Admin: ${admin?.username || 'admin'}`, PAGE_MARGIN, 46, {
-      width: rightColX - PAGE_MARGIN,
-      align: 'right'
-    });
+  doc.fontSize(9).fillColor('#BFDBFE')
+     .text(`Admin: ${admin?.username || 'admin'}`, PAGE_MARGIN, 46, {
+       width: rightColX - PAGE_MARGIN,
+       align: 'right'
+     });
 
-  /* ------------------------------------------------------------------ */
-  /*                       FILTER SUMMARY (optional)                    */
-  /* ------------------------------------------------------------------ */
+  /* Filter summary */
   let y = headerH + 20;
 
   const filterLines = [];
@@ -108,7 +88,9 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
     filterLines.push(`Date range:  ${filters.startDate || '—'}  →  ${filters.endDate || '—'}`);
   }
   if (filters.status) filterLines.push(`Status:  ${filters.status}`);
-  if (filters.paymentMethod) filterLines.push(`Payment method:  ${filters.paymentMethod}`);
+  if (filters.paymentMethod) {
+    filterLines.push(`Payment method:  ${filters.paymentMethod === 'Check' ? 'Cheque' : filters.paymentMethod}`);
+  }
   if (filters.currency) filterLines.push(`Currency:  ${filters.currency}`);
   if (filters.search) filterLines.push(`Search:  "${filters.search}"`);
   if (filters.category) filterLines.push(`Category filter applied`);
@@ -126,18 +108,14 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
     y += 8;
   }
 
-  /* ------------------------------------------------------------------ */
-  /*                          SUMMARY CARDS                             */
-  /* ------------------------------------------------------------------ */
+  /* Summary cards */
   const cardGap = 12;
   const cardW = (doc.page.width - PAGE_MARGIN * 2 - cardGap * 2) / 3;
   const cardH = 72;
   const cardY = y;
 
   const drawCard = (x, label, value, valueColor) => {
-    doc
-      .roundedRect(x, cardY, cardW, cardH, 8)
-      .fillAndStroke(COLORS.white, COLORS.border);
+    doc.roundedRect(x, cardY, cardW, cardH, 8).fillAndStroke(COLORS.white, COLORS.border);
 
     doc.fillColor(COLORS.muted).fontSize(9).font('Helvetica')
        .text(label, x + 14, cardY + 14, { width: cardW - 28, lineBreak: false });
@@ -148,8 +126,7 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
     doc.fillColor(valueColor).fontSize(valueSize).font('Helvetica-Bold')
        .text(valueStr, x + 14, cardY + 38, {
          width: cardW - 28,
-         lineBreak: false,
-         ellipsis: true
+         lineBreak: false
        });
   };
 
@@ -159,23 +136,9 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
 
   y = cardY + cardH + 22;
 
-  /* ------------------------------------------------------------------ */
-  /*                            TABLE SETUP                             */
-  /* ------------------------------------------------------------------ */
+  /* Table */
   const tableW = doc.page.width - PAGE_MARGIN * 2;
 
-  /*
-   * Column layout — 5 columns.
-   * A4 content width = 595 - 80 = 515 pt.
-   *
-   *   Date        :  70
-   *   Description : 160
-   *   Category    : 100
-   *   Amount      : 100   ← widened so Rs 100,000,000.00 fits at 9pt
-   *   Payment     :  85   ← widened so Check #numbers fit
-   *   ---------------------
-   *   Total       : 515
-   */
   const cols = [
     { key: 'date',        label: 'Date',        width:  70, align: 'left'  },
     { key: 'description', label: 'Description', width: 160, align: 'left'  },
@@ -184,9 +147,9 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
     { key: 'payment',     label: 'Payment',     width:  85, align: 'left'  }
   ];
 
-  const rowHeight = 26;         // slightly taller for breathing room
+  const rowHeight = 26;
   const rowPaddingX = 8;
-  const rowPaddingY = 9;        // vertical padding so text is vertically centered
+  const rowPaddingY = 9;
   const headerHeight = 26;
 
   const drawTableHeader = () => {
@@ -198,8 +161,7 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
       doc.text(c.label, x + rowPaddingX, y + 8, {
         width: c.width - rowPaddingX * 2,
         align: c.align,
-        lineBreak: false,
-        ellipsis: true
+        lineBreak: false
       });
       x += c.width;
     });
@@ -209,13 +171,9 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
 
   drawTableHeader();
 
-  /* ------------------------------------------------------------------ */
-  /*                             TABLE ROWS                             */
-  /* ------------------------------------------------------------------ */
   let isAlt = false;
 
   transactions.forEach((t) => {
-    /* Page break check */
     if (y + rowHeight > doc.page.height - 60) {
       doc.addPage();
       y = PAGE_MARGIN;
@@ -228,17 +186,12 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
     }
     isAlt = !isAlt;
 
-    const payment =
-      t.paymentMethod === 'Check' && t.checkNumber
-        ? `Check #${t.checkNumber}`
-        : t.paymentMethod || '';
-
     const row = {
       date: formatDate(t.date),
-      description: truncate(t.description, 26),
-      category: truncate(t.category?.name || '—', 18),
+      description: t.description || '',
+      category: t.category?.name || '—',
       amount: `${t.currency === 'PKR' ? 'Rs' : '$'} ${formatMoney(t.amount)}`,
-      payment
+      payment: paymentLabel(t)
     };
 
     let x = PAGE_MARGIN;
@@ -247,59 +200,40 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
       const cellWidth = c.width - rowPaddingX * 2;
       const text = String(row[c.key]);
       const isAmount = c.key === 'amount';
-
-      /* Pick base font */
       const font = isAmount ? 'Helvetica-Bold' : 'Helvetica';
       const baseSize = 9;
+      const size = fitFontSize(doc, text, cellWidth, baseSize, 5.5, font);
 
-      /* Auto-shrink font if the value doesn't fit */
-      const size = fitFontSize(doc, text, cellWidth, baseSize, 6, font);
-
-      /* Color */
       if (isAmount) {
         doc.fillColor(t.currency === 'PKR' ? COLORS.pkr : COLORS.usd);
       } else {
         doc.fillColor(COLORS.text);
       }
 
-      doc
-        .font(font)
-        .fontSize(size)
-        .text(text, x + rowPaddingX, y + rowPaddingY, {
-          width: cellWidth,
-          align: c.align,
-          lineBreak: false,
-          ellipsis: true
-        });
+      doc.font(font).fontSize(size)
+         .text(text, x + rowPaddingX, y + rowPaddingY, {
+           width: cellWidth,
+           align: c.align,
+           lineBreak: false
+         });
 
       x += c.width;
     });
 
-    /* Row divider */
-    doc
-      .moveTo(PAGE_MARGIN, y + rowHeight)
-      .lineTo(PAGE_MARGIN + tableW, y + rowHeight)
-      .strokeColor(COLORS.border)
-      .lineWidth(0.3)
-      .stroke();
+    doc.moveTo(PAGE_MARGIN, y + rowHeight)
+       .lineTo(PAGE_MARGIN + tableW, y + rowHeight)
+       .strokeColor(COLORS.border).lineWidth(0.3).stroke();
 
     y += rowHeight;
   });
 
-  /* Bottom border of table */
-  doc
-    .moveTo(PAGE_MARGIN, y)
-    .lineTo(PAGE_MARGIN + tableW, y)
-    .strokeColor(COLORS.accent)
-    .lineWidth(1)
-    .stroke();
+  doc.moveTo(PAGE_MARGIN, y)
+     .lineTo(PAGE_MARGIN + tableW, y)
+     .strokeColor(COLORS.accent).lineWidth(1).stroke();
 
-  /* ------------------------------------------------------------------ */
-  /*                            GRAND TOTAL                             */
-  /* ------------------------------------------------------------------ */
+  /* Grand total */
   y += 20;
 
-  /* Page-break guard */
   if (y + 60 > doc.page.height - 60) {
     doc.addPage();
     y = PAGE_MARGIN;
@@ -312,8 +246,7 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
      .text(`Rs ${formatMoney(totals.PKR)}`, PAGE_MARGIN, y, {
        width: tableW,
        align: 'right',
-       lineBreak: false,
-       ellipsis: true
+       lineBreak: false
      });
 
   y += 18;
@@ -322,24 +255,18 @@ const buildTransactionsPDF = ({ transactions, totals, filters, admin, res }) => 
      .text(`$ ${formatMoney(totals.USD)}`, PAGE_MARGIN, y, {
        width: tableW,
        align: 'right',
-       lineBreak: false,
-       ellipsis: true
+       lineBreak: false
      });
 
-  /* ------------------------------------------------------------------ */
-  /*                        FOOTER ON EVERY PAGE                        */
-  /* ------------------------------------------------------------------ */
+  /* Footer on every page */
   const range = doc.bufferedPageRange();
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
     const fy = doc.page.height - 40;
 
-    doc
-      .moveTo(PAGE_MARGIN, fy - 6)
-      .lineTo(doc.page.width - PAGE_MARGIN, fy - 6)
-      .strokeColor(COLORS.border)
-      .lineWidth(0.5)
-      .stroke();
+    doc.moveTo(PAGE_MARGIN, fy - 6)
+       .lineTo(doc.page.width - PAGE_MARGIN, fy - 6)
+       .strokeColor(COLORS.border).lineWidth(0.5).stroke();
 
     doc.fillColor(COLORS.muted).fontSize(8).font('Helvetica')
        .text('Shahid Expense — Personal Finance Manager', PAGE_MARGIN, fy, {

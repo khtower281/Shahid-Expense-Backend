@@ -11,17 +11,6 @@ const Category = require('../model/Category.model');
 /* -------------------------------------------------------------------------- */
 /*                                HELPERS                                     */
 /* -------------------------------------------------------------------------- */
-/**
- * Check number is optional — no validation needed.
- * Kept as a helper for consistency and future rules.
- * @returns {null}
- */
-const validateCheckNumber = () => null;
-
-/**
- * Build Mongo filter from query params.
- * Safe for find() / countDocuments() — Mongoose auto-casts.
- */
 const buildFilterFromQuery = (query) => {
   const {
     startDate,
@@ -47,14 +36,18 @@ const buildFilterFromQuery = (query) => {
     }
   }
 
-  /* Accept either single id or comma-separated ids */
   if (category) {
     const ids = String(category).split(',').map((s) => s.trim()).filter(Boolean);
     filter.category = ids.length > 1 ? { $in: ids } : ids[0];
   }
 
   if (status) filter.status = status;
-  if (paymentMethod) filter.paymentMethod = paymentMethod;
+
+  if (paymentMethod) {
+    /* Normalize display spelling to stored value */
+    filter.paymentMethod = paymentMethod === 'Cheque' ? 'Check' : paymentMethod;
+  }
+
   if (currency) filter.currency = currency;
 
   if (search) {
@@ -70,11 +63,6 @@ const buildFilterFromQuery = (query) => {
   return filter;
 };
 
-/**
- * Convert a query filter into one safe for use in aggregate() pipelines.
- * Why: aggregate() does NOT auto-cast strings to ObjectId like find() does.
- * That's why filtering by category used to return totals of 0 in the KPI cards.
- */
 const buildAggregationFilter = (query) => {
   const base = buildFilterFromQuery(query);
   const safe = { ...base };
@@ -117,9 +105,6 @@ const createTransaction = async (req, res) => {
       receiptUrl
     } = req.body;
 
-    /* Check number is optional — no validation */
-
-    /* Validate category exists */
     const categoryExists = await Category.findById(category);
     if (!categoryExists) {
       return res.status(404).json({ message: 'Category not found' });
@@ -157,21 +142,17 @@ const createTransaction = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 const getTransactions = async (req, res) => {
   try {
-    /* Pagination */
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
     const skip = (page - 1) * limit;
 
-    /* Filters */
     const filter = buildFilterFromQuery(req.query);
 
-    /* Sorting */
     const allowedSortFields = ['date', 'amount', 'createdAt', 'updatedAt'];
     const sortBy = allowedSortFields.includes(req.query.sortBy) ? req.query.sortBy : 'date';
     const order = req.query.order === 'asc' ? 1 : -1;
     const sort = { [sortBy]: order };
 
-    /* Query */
     const [transactions, totalCount] = await Promise.all([
       Transaction.find(filter)
         .populate('category', 'name color')
@@ -181,7 +162,6 @@ const getTransactions = async (req, res) => {
       Transaction.countDocuments(filter)
     ]);
 
-    /* Totals per currency for filtered set (aggregation-safe filter) */
     const totalsAgg = await Transaction.aggregate([
       { $match: buildAggregationFilter(req.query) },
       { $group: { _id: '$currency', total: { $sum: '$amount' } } }
@@ -245,9 +225,6 @@ const updateTransaction = async (req, res) => {
       return res.status(404).json({ message: 'Transaction not found' });
     }
 
-    /* Check number is optional — no validation */
-
-    /* If category changed, verify new one exists */
     if (req.body.category && String(req.body.category) !== String(transaction.category)) {
       const categoryExists = await Category.findById(req.body.category);
       if (!categoryExists) {
@@ -320,12 +297,6 @@ const deleteTransaction = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /*                          BULK DELETE                                       */
 /* -------------------------------------------------------------------------- */
-/**
- * @desc    Delete multiple transactions by IDs
- * @route   DELETE /api/transactions/bulk
- * @body    { ids: ["id1", "id2", ...] }
- * @access  Private (Admin)
- */
 const bulkDeleteTransactions = async (req, res) => {
   try {
     const { ids } = req.body;
@@ -349,11 +320,6 @@ const bulkDeleteTransactions = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /*                          MONTHLY AGGREGATION                               */
 /* -------------------------------------------------------------------------- */
-/**
- * @desc    Get monthly totals grouped by currency (for charts)
- * @route   GET /api/transactions/stats/monthly?year=2025
- * @access  Private (Admin)
- */
 const getMonthlyStats = async (req, res) => {
   try {
     const year = parseInt(req.query.year) || new Date().getFullYear();
@@ -365,10 +331,7 @@ const getMonthlyStats = async (req, res) => {
       { $match: { date: { $gte: start, $lte: end } } },
       {
         $group: {
-          _id: {
-            month: { $month: '$date' },
-            currency: '$currency'
-          },
+          _id: { month: { $month: '$date' }, currency: '$currency' },
           total: { $sum: '$amount' },
           count: { $sum: 1 }
         }
@@ -376,7 +339,6 @@ const getMonthlyStats = async (req, res) => {
       { $sort: { '_id.month': 1 } }
     ]);
 
-    /* Reshape to { month, PKR, USD, count } */
     const months = Array.from({ length: 12 }, (_, i) => ({
       month: i + 1,
       PKR: 0,
@@ -397,31 +359,101 @@ const getMonthlyStats = async (req, res) => {
 };
 
 /* -------------------------------------------------------------------------- */
-/*                         EXPORT PDF                                         */
+/*                     CATEGORY BREAKDOWN (aggregated)                        */
 /* -------------------------------------------------------------------------- */
 /**
- * @desc    Export transactions as a PDF report (uses the same filters as list)
- * @route   GET /api/transactions/export/pdf
+ * @desc    Aggregated totals grouped by category — full filtered set
+ * @route   GET /api/transactions/stats/by-category
  * @access  Private (Admin)
- * @query   same filters as GET /api/transactions (no pagination)
  */
+const getCategoryBreakdown = async (req, res) => {
+  try {
+    const match = buildAggregationFilter(req.query);
+
+    const rows = await Transaction.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$category',
+          total: { $sum: '$amount' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { total: -1 } }
+    ]);
+
+    const ids = rows.map((r) => r._id).filter(Boolean);
+    const cats = await Category.find({ _id: { $in: ids } }).lean();
+    const catMap = new Map(cats.map((c) => [String(c._id), c]));
+
+    const data = rows.map((r) => {
+      const c = catMap.get(String(r._id));
+      return {
+        categoryId: r._id || null,
+        name: c?.name || 'Uncategorized',
+        color: c?.color || '#94a3b8',
+        total: r.total,
+        count: r.count
+      };
+    });
+
+    return res.status(200).json({ data });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/* -------------------------------------------------------------------------- */
+/*                   PAYMENT METHOD BREAKDOWN (aggregated)                    */
+/* -------------------------------------------------------------------------- */
+/**
+ * @desc    Aggregated totals grouped by payment method — full filtered set
+ * @route   GET /api/transactions/stats/by-method
+ * @access  Private (Admin)
+ */
+const getPaymentMethodBreakdown = async (req, res) => {
+  try {
+    const match = buildAggregationFilter(req.query);
+
+    const rows = await Transaction.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: '$paymentMethod',
+          total: { $sum: '$amount' },
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const data = rows.map((r) => ({
+      method: r._id || 'Unknown',
+      total: r.total,
+      count: r.count
+    }));
+
+    return res.status(200).json({ data });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+/* -------------------------------------------------------------------------- */
+/*                         EXPORT PDF                                         */
+/* -------------------------------------------------------------------------- */
 const exportTransactionsPDF = async (req, res) => {
   try {
-    /* Filters (reuse the same builder as list) */
     const filter = buildFilterFromQuery(req.query);
 
-    /* Sorting (same rules as list) */
     const allowedSortFields = ['date', 'amount', 'createdAt', 'updatedAt'];
     const sortBy = allowedSortFields.includes(req.query.sortBy) ? req.query.sortBy : 'date';
     const order = req.query.order === 'asc' ? 1 : -1;
     const sort = { [sortBy]: order };
 
-    /* No pagination — export the full filtered set */
     const transactions = await Transaction.find(filter)
       .populate('category', 'name color')
       .sort(sort);
 
-    /* Totals per currency for filtered set (aggregation-safe filter) */
     const totalsAgg = await Transaction.aggregate([
       { $match: buildAggregationFilter(req.query) },
       { $group: { _id: '$currency', total: { $sum: '$amount' } } }
@@ -432,7 +464,6 @@ const exportTransactionsPDF = async (req, res) => {
       totals[t._id] = t.total;
     });
 
-    /* Hand off to the PDF builder */
     buildTransactionsPDF({
       transactions,
       totals,
@@ -444,7 +475,6 @@ const exportTransactionsPDF = async (req, res) => {
     if (!res.headersSent) {
       return res.status(500).json({ message: error.message });
     }
-    /* If PDF already started streaming, just kill the stream */
     res.end();
   }
 };
@@ -452,31 +482,20 @@ const exportTransactionsPDF = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /*                         EXPORT CSV                                         */
 /* -------------------------------------------------------------------------- */
-/**
- * @desc    Export transactions as CSV (uses the same filters as the list)
- * @route   GET /api/transactions/export/csv
- * @access  Private (Admin)
- * @query   same filters as GET /api/transactions (no pagination)
- */
 const exportTransactionsCSV = async (req, res) => {
   try {
-    /* Filters */
     const filter = buildFilterFromQuery(req.query);
 
-    /* Sorting */
     const allowedSortFields = ['date', 'amount', 'createdAt', 'updatedAt'];
     const sortBy = allowedSortFields.includes(req.query.sortBy) ? req.query.sortBy : 'date';
     const order = req.query.order === 'asc' ? 1 : -1;
     const sort = { [sortBy]: order };
 
-    /* Full filtered set — no pagination for exports */
     const transactions = await Transaction.find(filter)
       .populate('category', 'name color')
       .sort(sort);
 
-    /* Build CSV string in memory */
     const csv = buildTransactionsCSV(transactions);
-
     const filename = `shahid-expense-${Date.now()}.csv`;
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -494,12 +513,6 @@ const exportTransactionsCSV = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /*                         IMPORT CSV                                         */
 /* -------------------------------------------------------------------------- */
-/**
- * @desc    Import transactions from a CSV string (stateless — no file saved)
- * @route   POST /api/transactions/import/csv
- * @access  Private (Admin)
- * @body    { csv: "<raw csv contents>" }
- */
 const importTransactionsCSV = async (req, res) => {
   try {
     const { csv } = req.body;
@@ -508,7 +521,6 @@ const importTransactionsCSV = async (req, res) => {
       return res.status(400).json({ message: 'No CSV content provided' });
     }
 
-    /* Parse rows */
     let rows;
     try {
       rows = parseTransactionsCSV(csv);
@@ -520,7 +532,6 @@ const importTransactionsCSV = async (req, res) => {
       return res.status(400).json({ message: 'CSV contains no data rows' });
     }
 
-    /* Cap the row count to prevent abuse */
     const MAX_ROWS = 10000;
     if (rows.length > MAX_ROWS) {
       return res.status(400).json({
@@ -528,12 +539,9 @@ const importTransactionsCSV = async (req, res) => {
       });
     }
 
-    /* Load categories once for name → _id lookup (case-insensitive) */
     const categories = await Category.find().lean();
     const categoryMap = new Map();
-    categories.forEach((c) => {
-      categoryMap.set(c.name.trim().toLowerCase(), c);
-    });
+    categories.forEach((c) => categoryMap.set(c.name.trim().toLowerCase(), c));
 
     const valid = [];
     const errors = [];
@@ -541,7 +549,6 @@ const importTransactionsCSV = async (req, res) => {
     rows.forEach((row) => {
       const rowErrors = [];
 
-      /* ----- Date ----- */
       const rawDate = row.date;
       const parsedDate = rawDate ? new Date(rawDate) : null;
       if (!rawDate) {
@@ -550,13 +557,11 @@ const importTransactionsCSV = async (req, res) => {
         rowErrors.push(`Invalid date "${rawDate}"`);
       }
 
-      /* ----- Currency ----- */
       const currency = (row.currency || '').toUpperCase();
       if (!['PKR', 'USD'].includes(currency)) {
         rowErrors.push(`Currency must be PKR or USD (got "${row.currency}")`);
       }
 
-      /* ----- Amount ----- */
       const amountStr = String(row.amount || '').replace(/,/g, '').trim();
       const amount = Number(amountStr);
       if (!amountStr) {
@@ -565,7 +570,6 @@ const importTransactionsCSV = async (req, res) => {
         rowErrors.push(`Amount must be a positive number (got "${row.amount}")`);
       }
 
-      /* ----- Description ----- */
       const description = (row.description || '').trim();
       if (!description) {
         rowErrors.push('Description is required');
@@ -573,35 +577,28 @@ const importTransactionsCSV = async (req, res) => {
         rowErrors.push('Description cannot exceed 300 characters');
       }
 
-      /* ----- Category ----- */
       const categoryName = (row.category || '').trim();
       let category = null;
       if (!categoryName) {
         rowErrors.push('Category is required');
       } else {
         category = categoryMap.get(categoryName.toLowerCase()) || null;
-        if (!category) {
-          rowErrors.push(`Category "${categoryName}" not found`);
-        }
+        if (!category) rowErrors.push(`Category "${categoryName}" not found`);
       }
 
-      /* ----- Status (optional, default Pending) ----- */
       const statusRaw = (row.status || '').trim();
       const status = statusRaw || 'Pending';
       if (!['Pending', 'Completed'].includes(status)) {
         rowErrors.push(`Status must be Pending or Completed (got "${statusRaw}")`);
       }
 
-      /* ----- Payment Method ----- */
-      const paymentMethod = (row.paymentMethod || '').trim();
+      let paymentMethod = (row.paymentMethod || '').trim();
+      if (paymentMethod.toLowerCase() === 'cheque') paymentMethod = 'Check';
       if (!['Cash', 'Card', 'Check'].includes(paymentMethod)) {
-        rowErrors.push(`Payment method must be Cash, Card, or Check (got "${row.paymentMethod}")`);
+        rowErrors.push(`Payment method must be Cash, Card, or Cheque (got "${row.paymentMethod}")`);
       }
 
-      /* ----- Check Number (optional) ----- */
       const checkNumber = paymentMethod === 'Check' ? (row.checkNumber || '').trim() : '';
-
-      /* ----- Receipt URL (optional) ----- */
       const receiptUrl = (row.receiptUrl || '').trim();
 
       if (rowErrors.length > 0) {
@@ -622,7 +619,6 @@ const importTransactionsCSV = async (req, res) => {
       });
     });
 
-    /* Insert valid rows */
     let insertedCount = 0;
     if (valid.length > 0) {
       const inserted = await Transaction.insertMany(valid, { ordered: false });
@@ -644,11 +640,6 @@ const importTransactionsCSV = async (req, res) => {
 /* -------------------------------------------------------------------------- */
 /*                         DOWNLOAD CSV TEMPLATE                              */
 /* -------------------------------------------------------------------------- */
-/**
- * @desc    Download a starter CSV template
- * @route   GET /api/transactions/import/template
- * @access  Private (Admin)
- */
 const downloadCSVTemplate = (req, res) => {
   const csv = buildCSVTemplate();
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -664,6 +655,8 @@ module.exports = {
   deleteTransaction,
   bulkDeleteTransactions,
   getMonthlyStats,
+  getCategoryBreakdown,
+  getPaymentMethodBreakdown,
   exportTransactionsPDF,
   exportTransactionsCSV,
   importTransactionsCSV,
